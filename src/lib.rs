@@ -9,8 +9,8 @@
 
 
 
-// #[cfg(all(target_arch = "avr", ))]
+#[cfg(all(target_arch = "avr", ))]
 #[path ="rust_avr_ctypes.rs"]
 mod rust_ctypes;
 
-include!(concat!(env!("OUT_DIR"), "/bindings.rs"));
+include!(concat!(env!("OUT_DIR"), "/arduino_sdk_bindings.rs"));

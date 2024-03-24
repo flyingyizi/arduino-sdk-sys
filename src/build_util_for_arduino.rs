@@ -1,45 +1,12 @@
 pub type KVMap = std::collections::HashMap<String, String>;
 pub use cfg::{main_entry, Config};
+use serde_yaml::Value;
+use std::{
+    collections::VecDeque,
+    path::{Path, PathBuf},
+};
 
-use std::path::{Path, PathBuf};
-
-/// represent a board installed in a special platform ver
-#[derive(Debug, Clone)]
-pub struct BOARDID {
-    pub packager: String,
-    pub arch: String,
-    pub boardid: String,
-
-    pub platform_ver: String,
-}
-
-impl BOARDID {
-    pub fn new(fqbn: &str, platform_ver: &str) -> Option<Self> {
-        // deal fqbn contains items larger than 3
-        let x = fqbn.trim().splitn(4, ':').collect::<Vec<_>>();
-        if x.len() >= 3 {
-            let x = Self {
-                packager: x.get(0).unwrap().trim().to_string(),
-                arch: x.get(1).unwrap().trim().to_string(),
-                boardid: x.get(2).unwrap().trim().to_string(),
-                platform_ver: platform_ver.to_string(),
-            };
-            return Some(x);
-        }
-        None
-    }
-    pub fn platform_relative_path(&self) -> PathBuf {
-        let platform_relative = Path::new("packages")
-            .join(&self.packager)
-            .join("hardware")
-            .join(&self.arch)
-            .join(&self.platform_ver);
-        platform_relative
-    }
-    pub fn fqbn(&self) -> String {
-        format!("{}:{}:{}", self.packager, self.arch, self.boardid)
-    }
-}
+const PRIVATE_CORE_DEDICATED: &str = "_private_core_dedicated";
 
 #[derive(Debug, Clone, Default)]
 pub struct RecipePattern {
@@ -49,31 +16,34 @@ pub struct RecipePattern {
 }
 
 impl RecipePattern {
-    /// from must be: "asm" or "c", or "cpp"
-    pub fn merge_downstream_cfg(&mut self, cust: &DownStreamConfig, from: &str) {
-        match from {
-            "asm" | "c" | "cpp" => {
-                if let Some((normal, inc)) = &cust.get_compile_flags(from) {
-                    let normal = normal.iter().map(|s| s.to_string()).collect::<Vec<_>>();
-                    self.flags.extend(normal);
+    pub fn new(cmd: &str, flags: &VecDeque<String>) -> Self {
+        let inc = flags
+            .iter()
+            .filter_map(|s| s.strip_prefix("-I").map(String::from))
+            .collect::<Vec<_>>();
 
-                    let inc = inc.iter().map(|s| s.to_string()).collect::<Vec<_>>();
-                    self.inc_dirs.extend(inc);
-                }
-            }
-            _ => {}
+        let others = &flags
+            .iter()
+            .filter(|s| s.starts_with("-I") == false)
+            .map(|s| s.to_owned())
+            .collect::<Vec<_>>();
+
+        Self {
+            cmd: cmd.to_string(),
+            flags: others.clone(),
+            inc_dirs: inc.clone(),
         }
     }
 }
 
 #[derive(Debug, Clone)]
 struct DownStreamConfig {
-    input: serde_json::Value,
+    input: serde_yaml::Value,
 }
 impl DownStreamConfig {
     pub fn new(env_arduino_sys: Option<&str>) -> Self {
         let default = DownStreamConfig {
-            input: serde_json::json!({"fqbn":"arduino:avr:uno"}),
+            input: serde_yaml::from_str::<Value>(r#"{ "fqbn":"arduino:avr:uno" }"#).unwrap(),
         };
 
         if env_arduino_sys.is_none() {
@@ -89,7 +59,7 @@ impl DownStreamConfig {
             return default;
         };
 
-        if let Ok(p) = serde_json::from_str::<serde_json::Value>(binding.as_str()) {
+        if let Ok(p) = serde_yaml::from_str::<serde_yaml::Value>(binding.as_str()) {
             return DownStreamConfig { input: p };
         }
 
@@ -108,24 +78,12 @@ impl DownStreamConfig {
         None
     }
 
-    pub fn get_compile_flags<'a>(&'a self, key: &str) -> Option<(Vec<&'a str>, Vec<&'a str>)> {
+    pub fn get_compile_flags<'a>(&'a self, key: &str) -> Option<VecDeque<String>> {
         if let Some(a) = self.input.get("compile_flags") {
-            let x = Self::get_strarray(&a, key);
+            let x = Self::get_strarray(&a, key)
+                .map(|v| v.iter().map(|s| s.to_string()).collect::<VecDeque<_>>());
 
-            if let Some(x) = x {
-                let inc = x
-                    .iter()
-                    .filter(|i| i.trim_start().starts_with("-I"))
-                    .map(|i| i.trim_start().strip_prefix("-I").unwrap().trim_end())
-                    .collect::<Vec<_>>();
-
-                let normal = x
-                    .iter()
-                    .filter(|i| false == i.trim_start().starts_with("-I"))
-                    .map(|i| i.trim())
-                    .collect::<Vec<_>>();
-                return Some((normal, inc));
-            }
+            return x;
         }
 
         None
@@ -144,9 +102,9 @@ impl DownStreamConfig {
         None
     }
 
-    fn get_strarray<'a>(input: &'a serde_json::Value, key: &str) -> Option<Vec<&'a str>> {
+    fn get_strarray<'a>(input: &'a serde_yaml::Value, key: &str) -> Option<Vec<&'a str>> {
         if let Some(e) = input.get(key) {
-            if let Some(es) = e.as_array() {
+            if let Some(es) = e.as_sequence() {
                 let ret = es.iter().map(|s| s.as_str().unwrap()).collect::<Vec<_>>();
 
                 return Some(ret);
@@ -157,8 +115,7 @@ impl DownStreamConfig {
 }
 
 mod cfg {
-    use super::board_txt::BoardInfo;
-    use super::{DownStreamConfig, BOARDID};
+    use super::{board_txt::BoardInfo, DownStreamConfig};
     use bindgen::Bindings;
     use std::process::Command;
     // use serde::{Deserialize, Serialize};
@@ -178,7 +135,7 @@ mod cfg {
     #[derive(Debug)]
     pub struct Config {
         // arduino_data: String,
-        arduino_user: String,
+        // arduino_user: String,
 
         board_info: BoardInfo,
         external_libraries_path: Option<Vec<PathBuf>>,
@@ -190,7 +147,7 @@ mod cfg {
         pub fn new() -> Result<Self, String> {
             let mut cfg_from_file: Option<PathBuf> = None;
 
-            let cust = if let Ok(env_arduino_sys) = std::env::var("ARDUINO_SYS") {
+            let cust = if let Ok(env_arduino_sys) = std::env::var("ARDUINO_SDK_CONFIG") {
                 cfg_from_file = Some(Path::new(env_arduino_sys.as_str()).to_owned());
                 DownStreamConfig::new(Some(env_arduino_sys.as_str()))
             } else {
@@ -204,45 +161,25 @@ mod cfg {
             };
 
             /////////////////
-            let (arduino_data, arduino_user) = if let Some(x) = arduino_cli_config_get_data_user() {
+            let arduino_user = if let Some(x) = arduino_cli_config_get_user() {
                 x
             } else {
                 return Err("can not find arduino-cli command, pls add it to path".to_string());
             };
 
-            let mut board_info = if let Some(installed) = get_arduino_cli_installed(&fqbn) {
-                match BoardInfo::new(arduino_data.as_str(), &installed) {
-                    Ok(b) => b,
-                    Err(e) => return Err(e),
-                }
-            } else {
-                return Err(format!("fqbn:{} not installed", fqbn));
+            let board_info = match BoardInfo::new(fqbn, Some(&cust)) {
+                Ok(b) => b,
+                Err(e) => return Err(e),
             };
 
-            // merge downstream config
-            if let Some(x) = board_info.c_pattern.as_mut() {
-                x.merge_downstream_cfg(&cust, "c");
-                x.flags
-                    .retain(|s| s.as_str() != "-g" && s.as_str() != "-flto");
-            }
-            if let Some(x) = board_info.cpp_pattern.as_mut() {
-                x.merge_downstream_cfg(&cust, "cpp");
-                x.flags
-                    .retain(|s| s.as_str() != "-g" && s.as_str() != "-flto");
-            }
-            if let Some(x) = board_info.s_pattern.as_mut() {
-                x.merge_downstream_cfg(&cust, "asm");
-                x.flags
-                    .retain(|s| s.as_str() != "-g" && s.as_str() != "-flto");
-            }
             let external_libraries_path =
                 cust.get_external_libraries_path(&Path::new(&arduino_user).join("libraries"));
             /////////////////
 
-            let arduino_libraries_path = board_info.get_arduino_libraries_path(&arduino_data);
+            let arduino_libraries_path = board_info.get_arduino_libraries_path();
             Ok(Self {
                 // arduino_data,
-                arduino_user,
+                // arduino_user,
                 board_info,
                 external_libraries_path,
                 arduino_libraries_path,
@@ -252,22 +189,26 @@ mod cfg {
 
         /// (relative to CARGO_MANIFEST_DIR path, absolute path)
         pub fn get_archive_dir(&self) -> (PathBuf, PathBuf) {
-            let relative_p = self
-                .board_info
-                .platform_relative_path()
-                .join("cores")
-                .join(self.board_info.get_var("build.core").unwrap())
-                .join(&self.board_info.board.boardid);
+            let (packager, arch, boardid) = self.board_info.get_packager_arch_boardid();
+
             let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
 
-            let relative_p = Path::new("arduino-lib").join(relative_p);
+            let relative_p = Path::new("arduino-lib")
+                .join(packager)
+                .join(arch)
+                .join(self.board_info.get_var("version").unwrap())
+                .join("cores")
+                .join(self.board_info.get_var("build.core").unwrap())
+                .join(boardid)
+                .join(self.board_info.get_var("build.variant").unwrap());
+
             let arch_dir = manifest_dir.join(&relative_p);
 
             (relative_p, arch_dir)
         }
 
         pub fn compile(&self) {
-            println!("cargo:rerun-if-env-changed=ARDUINO_SYS");
+            println!("cargo:rerun-if-env-changed=ARDUINO_SDK_CONFIG");
 
             const CORE_NAME: &str = "arduino_core";
             const EXTERNAL_NAME: &str = "arduino_external";
@@ -276,12 +217,13 @@ mod cfg {
             if !ar_dir.exists() {
                 let _ = std::fs::create_dir_all(&ar_dir);
             }
+            let out_dir = std::env::var("OUT_DIR").unwrap();
 
             let static_core_lib_path = ar_dir.join(format!("lib{}.a", CORE_NAME));
 
             if !static_core_lib_path.exists() {
                 let objs = self.compile_core_();
-                if let Some(p) = &self.board_info.ar_pattern {
+                if let Some(p) = &self.board_info.get_ar_pat() {
                     let mut ar = std::process::Command::new(p.cmd.as_str());
                     ar.arg("rcs").arg(&static_core_lib_path).args(&objs);
                     ar.status().expect("fail to execute");
@@ -292,10 +234,9 @@ mod cfg {
                 println!("cargo:rustc-link-lib=static={}", CORE_NAME);
             }
 
-            let out_dir = std::env::var("OUT_DIR").unwrap();
             let external_lib_path = Path::new(&out_dir).join(format!("lib{}.a", EXTERNAL_NAME));
             if let Some(objs) = self.compile_external_() {
-                if let Some(p) = &self.board_info.ar_pattern {
+                if let Some(p) = &self.board_info.get_ar_pat() {
                     let mut ar = std::process::Command::new(p.cmd.as_str());
                     ar.arg("rcs").arg(&external_lib_path).args(&objs);
                     ar.status().expect("fail to execute");
@@ -320,18 +261,30 @@ mod cfg {
             for p in &self.arduino_libraries_path {
                 builder.include(p);
             }
+            if let Some(p) = self.board_info.get_core_dedicated_pat() {
+                p.inc_dirs.iter().for_each(|i| {
+                    builder.include(i);
+                });
+                p.flags.iter().for_each(|i| {
+                    builder.asm_flag(i);
+                    builder.flag(i);
+                });
+            }
             // builder
             //     .target("avr-atmega328p")
             //     .opt_level_str("s")
             //     .host("x86_64-pc-windows-msvc");
-            // builder
-            //     .target("esp32")
-            //     .opt_level_str("s")
-            //     .host("x86_64-pc-windows-msvc");
+            builder
+                .target("esp32")
+                .opt_level_str("s")
+                .host("x86_64-pc-windows-msvc");
 
             let mut out_objects = Vec::<PathBuf>::new();
             //s
-            if let (Some(p), files) = (&self.board_info.s_pattern, self.core_project_files("*.S")) {
+            if let (Some(p), files) = (
+                &self.board_info.get_asm_pat(),
+                self.core_project_files("*.S"),
+            ) {
                 if files.len() > 0 {
                     println!("cargo:warning=: core asm lib not yet built', building now");
                     let mut b = builder.clone();
@@ -350,7 +303,8 @@ mod cfg {
                 }
             }
             //c
-            if let (Some(p), files) = (&self.board_info.c_pattern, self.core_project_files("*.c")) {
+            if let (Some(p), files) = (&self.board_info.get_c_pat(), self.core_project_files("*.c"))
+            {
                 if files.len() > 0 {
                     println!("cargo:warning=: core c lib not yet built', building now");
                     let mut b = builder.clone();
@@ -371,7 +325,7 @@ mod cfg {
 
             //cpp
             if let (Some(p), files) = (
-                &self.board_info.cpp_pattern,
+                &self.board_info.get_cpp_pat(),
                 self.core_project_files("*.cpp"),
             ) {
                 if files.len() > 0 {
@@ -394,21 +348,6 @@ mod cfg {
             out_objects
         }
 
-        fn archive_objects(
-            ar_cmd: &str,
-            dest: &Path,
-            objects: &Vec<PathBuf>,
-            other_archive: Option<&PathBuf>,
-        ) {
-            let mut ar = std::process::Command::new(ar_cmd);
-
-            if let Some(p) = other_archive {
-                ar.arg("rcsT").arg(dest).args(objects).arg(p);
-            } else {
-                ar.arg("rcs").arg(dest).args(objects);
-            }
-            ar.status().expect("failed to execute");
-        }
         /// compile external libraries ,that located in user directory (sketchbook).
         fn compile_external_(&self) -> Option<Vec<PathBuf>> {
             let external_libraries_path = if let Some(x) = &self.external_libraries_path {
@@ -442,15 +381,15 @@ mod cfg {
             //     .target("avr-atmega328p")
             //     .opt_level_str("s")
             //     .host("x86_64-pc-windows-msvc");
-            // builder
-            //     .target("esp32")
-            //     .opt_level_str("s")
-            //     .host("x86_64-pc-windows-msvc");
+            builder
+                .target("esp32")
+                .opt_level_str("s")
+                .host("x86_64-pc-windows-msvc");
             let mut out_objects = Vec::<PathBuf>::new();
 
             //c
             if let (Some(p), files) = (
-                &self.board_info.c_pattern,
+                &self.board_info.get_c_pat(),
                 self.external_libraries_project_files(&external_libraries_path, "*.c"),
             ) {
                 if files.len() > 0 {
@@ -475,7 +414,7 @@ mod cfg {
             }
             //cpp
             if let (Some(p), files) = (
-                &self.board_info.c_pattern,
+                &self.board_info.get_cpp_pat(),
                 self.external_libraries_project_files(&external_libraries_path, "*.cpp"),
             ) {
                 if files.len() > 0 {
@@ -544,7 +483,7 @@ mod cfg {
 
         pub fn generate_bindings(&self) {
             let out_path = PathBuf::from(std::env::var("OUT_DIR").unwrap());
-            let out_file = out_path.join("bindings.rs");
+            let out_file = out_path.join("arduino_sdk_bindings.rs");
 
             let bindgen_headers = if let Some(x) = self.get_bindgen_headers() {
                 x
@@ -553,6 +492,15 @@ mod cfg {
             };
 
             let mut file = std::fs::File::create(out_file).expect("?");
+
+            let mulit_lines = r#"
+extern "C" {
+    /// init() is Arduino framework provided function to initialize the board. 
+    /// down-stream app would need to call it in rust as well before we start using any Arduino sdk library    
+    pub fn init();
+}           
+            "#;
+            let _ = file.write_all(mulit_lines.as_bytes());
 
             let builder = self.bindgen_configure();
             // generate each header in seperate mod, mod name is the header name
@@ -594,10 +542,11 @@ mod cfg {
         }
 
         fn bindgen_configure(&self) -> bindgen::Builder {
+            let (_, arch, _) = self.board_info.get_packager_arch_boardid();
             let mut builder = bindgen::Builder::default();
 
             let mut flags = ["-x", "c++"].map(String::from).to_vec(); //"-std=gnu++11"
-            if let Some(p) = &self.board_info.cpp_pattern {
+            if let Some(p) = &self.board_info.get_cpp_pat() {
                 flags.extend(
                     p.flags
                         .iter()
@@ -605,7 +554,7 @@ mod cfg {
                         .map(String::from)
                         .collect::<Vec<_>>(),
                 );
-                if self.board_info.board.arch == "avr" {
+                if arch == "avr" {
                     // cmd is <gcc-home>/bin/avr-g++,  covert to <gcc-home>/avr/include
                     let x = Path::new(&p.cmd);
                     if x.components().count() >= 3 {
@@ -622,7 +571,7 @@ mod cfg {
                 }
             }
 
-            if self.board_info.board.arch.as_str() == "avr" {
+            if arch == "avr" {
                 builder = builder
                     .ctypes_prefix("crate::rust_ctypes")
                     .size_t_is_usize(false);
@@ -675,52 +624,20 @@ mod cfg {
         }
         results
     }
-    /// get installed platform version
-    fn get_arduino_cli_installed(fqbn: &str) -> Option<BOARDID> {
-        ////////////////////////
-        let output = Command::new("arduino-cli")
-            .arg("board")
-            .arg("listall")
-            .arg("--format")
-            .arg("json")
-            .output();
-        if let Err(_) = output {
-            println!("failed to execute process");
-            return None;
-        }
-        let output = output.unwrap();
-
-        let target_fqbn = serde_json::json!(fqbn);
-        if let Ok(o) = serde_json::from_slice::<serde_json::Value>(output.stdout.as_slice()) {
-            if let Some(v) = o.get("boards") {
-                if let Some(vec) = v.as_array() {
-                    for b in vec {
-                        if b.get("fqbn") == Some(&target_fqbn) {
-                            let t = b.get("platform").unwrap();
-                            let ver = t.get("installed").unwrap().as_str().unwrap();
-                            return BOARDID::new(fqbn, ver);
-                        }
-                    }
-                }
-            }
-        }
-        None
-    }
-
-    ///get(directories.data, directories.user) from arduino-cli.yaml config file
-    fn arduino_cli_config_get_data_user() -> Option<(String, String)> {
+    ///get directories.user from arduino-cli.yaml config file
+    fn arduino_cli_config_get_user() -> Option<String> {
         if let Ok(output) = Command::new("arduino-cli")
             .arg("config")
             .arg("dump")
             .arg("--format")
-            .arg("json")
+            .arg("yaml")
             .output()
         {
-            if let Ok(d) = serde_json::from_slice::<serde_json::Value>(output.stdout.as_slice()) {
+            if let Ok(d) = serde_yaml::from_slice::<serde_yaml::Value>(output.stdout.as_slice()) {
                 if let Some(dir) = d.get("directories") {
-                    let data = dir.get("data").unwrap().as_str().unwrap();
+                    // let data = dir.get("data").unwrap().as_str().unwrap();
                     let user = dir.get("user").unwrap().as_str().unwrap();
-                    return Some((data.trim().to_string(), user.trim().to_string()));
+                    return Some(user.trim().to_string());
                 }
             }
         }
@@ -730,115 +647,65 @@ mod cfg {
 }
 
 mod board_txt {
-    use super::{package_index::PackageIndexJSON, KVMap};
-    use super::{RecipePattern, BOARDID};
-
-    use std::path::{Path, PathBuf};
+    use super::{DownStreamConfig, KVMap};
+    use super::{RecipePattern, PRIVATE_CORE_DEDICATED};
 
     use std::{
-        collections::{HashMap, HashSet},
+        collections::{HashMap, VecDeque},
         // io::BufRead,
+        path::{Path, PathBuf},
     };
-    type BoardTXT = HashMap<String, KVMap>;
 
     #[derive(Debug, Clone)]
     pub struct BoardInfo {
         //
-        pub board: BOARDID,
+        pub fqbn: String,
 
         /// resolved key/value form platform.txt and board.txt.
-        pub kv: HashMap<String, String>,
+        pub build_properties: HashMap<String, String>,
         // pub todo: HashMap<String, String>,
         ///
-        pub s_pattern: Option<RecipePattern>,
-        pub cpp_pattern: Option<RecipePattern>,
-        pub c_pattern: Option<RecipePattern>,
-        pub ar_pattern: Option<RecipePattern>,
+        pub patterns: HashMap<String, RecipePattern>,
     }
 
     impl BoardInfo {
-        pub fn new(data_path: &str, install_board: &BOARDID) -> Result<Self, String> {
-            let data_path = Path::new(data_path.trim());
-            let platform_path = data_path.join(install_board.platform_relative_path());
+        pub fn new(fqbn: &str, cust: Option<&DownStreamConfig>) -> Result<Self, String> {
+            let build_properties = if let Some(x) = get_build_properties(fqbn) {
+                x
+            } else {
+                return Err(format!(
+                    "execute arduino-cli board details -f -b {} fail",
+                    fqbn
+                ));
+            };
 
-            let boardtxt_path = &platform_path.join("boards.txt");
-            let platformtxt_path = &platform_path.join("platform.txt");
-
-            let platform_kv: KVMap;
-            let board_kv: KVMap;
-
-            match parse_boardtxt(boardtxt_path) {
-                Ok(i) => {
-                    if let Some(t) = i.get(&install_board.boardid) {
-                        board_kv = t.to_owned();
-                    } else {
-                        return Err(format!("board {} can not find", &install_board.fqbn()));
-                    }
-                }
-                Err(e) => {
-                    return Err(e);
-                }
-            }
-
-            let package_index = PackageIndexJSON::new(data_path, install_board.arch.as_str());
-
-            match std::fs::read_to_string(platformtxt_path) {
-                Ok(i) => {
-                    let mut orig = i;
-                    for (bk, bv) in &board_kv {
-                        let (from, to) = (format!("{{{}}}", bk), bv.as_str());
-                        orig = orig.replace(from.as_str(), to);
-                    }
-                    platform_kv = strlines_to_kv(&orig);
-                }
-                Err(e) => {
-                    return Err(e.to_string());
-                }
-            }
-
-            //before analyze kv,store the orig
-            let orig_recipe_c_o_pattern = platform_kv.get("recipe.c.o.pattern".into()).cloned();
-            let orig_recipe_S_o_pattern = platform_kv.get("recipe.S.o.pattern".into()).cloned();
-            let orig_recipe_cpp_o_pattern = platform_kv.get("recipe.cpp.o.pattern".into()).cloned();
-            let orig_recipe_ar_pattern = platform_kv.get("recipe.ar.pattern".into()).cloned();
-
-            let (kv, _tobedo) = analyze_kv(
-                data_path,
-                &install_board,
-                &board_kv,
-                &platform_kv,
-                &package_index,
-            );
-
-            let c_pattern = parse_recipe_xx_patern(&orig_recipe_c_o_pattern, &kv);
-            let cpp_pattern = parse_recipe_xx_patern(&orig_recipe_cpp_o_pattern, &kv);
-            let s_pattern = parse_recipe_xx_patern(&orig_recipe_S_o_pattern, &kv);
-            let ar_pattern = parse_recipe_xx_patern(&orig_recipe_ar_pattern, &kv);
+            let patterns = get_patterns_(&build_properties, cust);
 
             return Ok(Self {
-                board: install_board.clone(),
-                kv,
+                fqbn: fqbn.to_string(),
+                build_properties,
                 // todo:_tobedo,
-                c_pattern,
-                cpp_pattern,
-                s_pattern,
-                ar_pattern,
+                patterns,
             });
+        }
+        pub fn get_packager_arch_boardid<'a>(&'a self) -> (&'a str, &'a str, &'a str) {
+            let x = self.fqbn.splitn(4, ":").collect::<Vec<_>>();
+
+            (x[0], x[1], x[2])
         }
 
         /// var defined in board.txt and platform.txt
         pub fn get_var(&self, key: &str) -> Option<&String> {
-            self.kv.get(key)
+            self.build_properties.get(key)
         }
 
-        /// get relative to arduino-data path
-        pub fn platform_relative_path(&self) -> PathBuf {
-            self.board.platform_relative_path()
-        }
-        pub fn get_arduino_libraries_path(&self, arduino_data: &str) -> Vec<PathBuf> {
-            let library_root = Path::new(&arduino_data)
-                .join(&self.platform_relative_path())
-                .join("libraries");
+        pub fn get_arduino_libraries_path(&self) -> Vec<PathBuf> {
+            let library_root = Path::new(
+                self.build_properties
+                    .get(&"runtime.platform.path".to_string())
+                    .unwrap(),
+            )
+            .join("libraries");
             let mut result = vec![];
 
             if let Ok(entrys) = get_dir_entries(&library_root) {
@@ -851,6 +718,22 @@ mod board_txt {
                 }
             }
             result
+        }
+
+        pub fn get_core_dedicated_pat<'a>(&'a self) -> Option<&'a RecipePattern> {
+            self.patterns.get(PRIVATE_CORE_DEDICATED.into())
+        }
+        pub fn get_c_pat<'a>(&'a self) -> Option<&'a RecipePattern> {
+            self.patterns.get("recipe.c.o.pattern".into())
+        }
+        pub fn get_cpp_pat<'a>(&'a self) -> Option<&'a RecipePattern> {
+            self.patterns.get("recipe.cpp.o.pattern".into())
+        }
+        pub fn get_asm_pat<'a>(&'a self) -> Option<&'a RecipePattern> {
+            self.patterns.get("recipe.S.o.pattern".into())
+        }
+        pub fn get_ar_pat<'a>(&'a self) -> Option<&'a RecipePattern> {
+            self.patterns.get("recipe.ar.pattern".into())
         }
     }
 
@@ -867,263 +750,107 @@ mod board_txt {
         Ok(dir_entries)
     }
 
-    //////////////////////
+    /// get installed platform version
+    fn get_build_properties(fqbn: &str) -> Option<KVMap> {
+        ////////////////////////
+        let output = std::process::Command::new("arduino-cli")
+            .arg("board")
+            .arg("details")
+            .arg("-f")
+            .arg("-b")
+            .arg(fqbn)
+            .arg("--format")
+            .arg("yaml")
+            .output();
+        if let Err(_) = output {
+            println!("failed to execute process");
+            return None;
+        }
+        let output = output.unwrap();
 
-    /// output board infos . output likes
-    ///```text
-    /// {  "uno": {"build.core": "arduino",...  }, .... }
-    ///```
-    ///
-    fn parse_boardtxt(boardtxt_path: &Path) -> Result<BoardTXT, String> {
-        let mut all: BoardTXT = HashMap::new();
+        if let Ok(o) = serde_yaml::from_slice::<serde_yaml::Value>(output.stdout.as_slice()) {
+            if let Some(v) = o.get("buildproperties") {
+                if let Some(vec) = v.as_sequence() {
+                    let x = vec
+                        .iter()
+                        .filter_map(|s| s.as_str())
+                        .filter_map(|s| s.split_once("="))
+                        .map(|(l, r)| (l.trim().to_string(), r.trim().to_string()))
+                        .collect::<KVMap>();
 
-        let binding = if let Ok(b) = std::fs::read_to_string(boardtxt_path) {
-            b
-        } else {
-            return Err(format!("open fail:{:?}", boardtxt_path));
-        };
-
-        // collect boardid
-        for line in binding.lines() {
-            if let Some((first, _)) = line.split_once('=') {
-                if let Some(id) = first.trim().strip_suffix(".name") {
-                    all.insert(id.to_string(), HashMap::new());
+                    return Some(x);
                 }
             }
-        }
-
-        for line in binding.lines() {
-            if let Some((first, second)) = line.split_once('=') {
-                let key = first.trim().to_string();
-                let value = second.trim().to_string();
-
-                let (b, bk) = key.split_once('.').unwrap();
-                if let Some(x) = all.get_mut(b) {
-                    x.insert(bk.to_string(), value);
-                }
-            }
-        }
-
-        all.retain(|_k, v| v.is_empty() == false);
-
-        Ok(all)
-    }
-
-    /// return (finall, tobedone)
-    fn analyze_kv(
-        data_path: &Path,
-        board: &BOARDID,
-        board_kv: &KVMap,
-        platform_kv: &KVMap,
-        package_index: &PackageIndexJSON,
-    ) -> (
-        HashMap<String, String>, /*finall*/
-        HashMap<String, String>, /*tobedone*/
-    ) {
-        let mut final_kv = HashMap::<String, String>::new();
-        let mut tobe_expand_kv = HashMap::<String, String>::new();
-
-        //internal var
-        final_kv.insert("build.arch".to_string(), board.arch.to_ascii_uppercase());
-        final_kv.insert("runtime.ide.version".to_string(), "10819".to_string()); //https://github.com/arduino/arduino-cli/issues/725
-        final_kv.insert(
-            "runtime.platform.path".to_string(),
-            data_path
-                .join(board.platform_relative_path())
-                .to_string_lossy()
-                .to_string(),
-        );
-        tobe_expand_kv.insert(
-            "build.core.path".to_string(),
-            "{runtime.platform.path}/cores/{build.core}".to_string(),
-        );
-        tobe_expand_kv.insert(
-            "build.variant.path".to_string(),
-            "{runtime.platform.path}/variants/{build.variant}".to_string(),
-        );
-
-        for (k, v) in platform_kv {
-            if v.contains("{") {
-                tobe_expand_kv.insert(k.to_owned(), v.to_owned());
-            } else {
-                final_kv.insert(k.to_owned(), v.to_owned());
-            }
-        }
-        // vars is high prioriy than platform
-        for (k, v) in board_kv {
-            if v.contains("{") {
-                let _ = tobe_expand_kv.insert(k.to_owned(), v.to_owned());
-            } else {
-                let _ = final_kv.insert(k.to_owned(), v.to_owned());
-            }
-        }
-
-        //collect all runtime.tools.xxx.path vars
-        let mut runtimetools_vars = HashMap::<String, String>::new();
-        for (_k, v) in &tobe_expand_kv {
-            for s in get_all_refs(v.as_str()) {
-                if s.starts_with("runtime.tools.") && s.ends_with(".path") {
-                    let _ = runtimetools_vars.insert(s.to_string(), "".to_string());
-                }
-            }
-        }
-
-        for (k, v) in &mut runtimetools_vars {
-            if let Some(p) = &package_index.search_runtime_tools(&board, k) {
-                *v = data_path.join(p).to_string_lossy().to_string();
-            }
-        }
-        for (k, v) in runtimetools_vars {
-            if v != "" {
-                final_kv.insert(k, v);
-            }
-        }
-
-        resolve_kv(&mut final_kv, &mut tobe_expand_kv);
-
-        (final_kv, tobe_expand_kv)
-    }
-
-    fn resolve_kv(finally: &mut HashMap<String, String>, todo: &mut HashMap<String, String>) {
-        if todo.len() == 0 {
-            return;
-        }
-        let mut str = kv_to_strlines(&todo);
-        let str_b = str.clone();
-
-        for var in get_all_refs(str_b.as_str()) {
-            if let Some(fina) = finally.get(var) {
-                let from = format!("{{{}}}", var);
-                str = str.replace(from.as_str(), fina);
-            }
-        }
-        if str == str_b {
-            return;
-        }
-
-        *todo = strlines_to_kv(&str);
-
-        for (k, v) in &*todo {
-            if v.contains("{") == false {
-                finally.insert(k.to_owned(), v.to_owned());
-            }
-        }
-
-        todo.retain(|_k, v| v.as_str().contains("{"));
-
-        return resolve_kv(finally, todo);
-    }
-
-    pub fn get_all_refs<'a>(s: &'a str) -> HashSet<&'a str> {
-        let mut result = HashSet::<&str>::new();
-        let mut last_openbr: Option<usize> = None;
-
-        for (i, c) in s.chars().enumerate() {
-            if c == '{' {
-                last_openbr = Some(i + 1);
-            } else if c == '}' {
-                if let Some(b) = last_openbr {
-                    result.insert(&s[b..i]);
-                    last_openbr = None;
-                }
-            }
-        }
-
-        result
-    }
-
-    fn try_replace_vars(s: &str, finally: &HashMap<String, String>) -> Option<String> {
-        let mut ret = s.to_string();
-
-        let mut modified = false;
-        let o = get_all_refs(s);
-        if o.len() > 0 {
-            for s in o {
-                if let Some(fina) = finally.get(s) {
-                    modified = true;
-                    let from = format!("{{{}}}", s);
-                    ret = ret.replace(from.as_str(), fina);
-                }
-            }
-        }
-        if modified {
-            return Some(ret);
         }
         None
     }
-
-    /// orig_s:input orignal recipe pattern value part,
-    fn parse_recipe_xx_patern(
-        orig: &Option<String>,
-        kv: &HashMap<String, String>,
-    ) -> Option<RecipePattern> {
-        if orig.is_none() {
-            return None;
-        }
-        let orig_s = orig.as_ref().unwrap().as_str();
-
-        let mut ret = RecipePattern::default();
-
-        let mut v = split_quoted_string(orig_s.trim());
-        ret.cmd = v.get(0).cloned().unwrap();
-        v.drain(0..1);
-
-        //remove -o "{object_file}"
-        if let Some(index) = v.iter().position(|s| *s == "-o") {
-            v.remove(index);
-            if index < v.len() {
-                v.remove(index);
-            }
-        }
-
-        for s in v {
-            let s_t = s.trim();
-            if let Some(left) = s_t.strip_prefix("-I") {
-                ret.inc_dirs.push(left.to_string());
-            } else if s_t.starts_with("@")
+    fn get_patterns_(
+        build_properties: &KVMap,
+        cust: Option<&DownStreamConfig>,
+    ) -> HashMap<String, RecipePattern> {
+        let is_removeable = |s_t: &str| {
+            s_t.starts_with("@")
                 || s_t == "{includes}"
                 || s_t == "{source_file}"
                 || s_t == "{archive_file_path}"
+                || s_t == "-o"
                 || s_t == "{object_file}"
-            {
-            } else {
-                ret.flags.push(s_t.to_string());
+                || s_t == "-g"
+                || s_t == "-flto"
+        };
+
+        let mut x = build_properties
+            .iter()
+            .filter(|(k, _v)| k.starts_with("recipe.") && k.ends_with(".pattern"))
+            .map(|(k, v)| {
+                let mut vv = VecDeque::from_iter(split_quoted_string(v.as_str()));
+                vv.retain(|i| is_removeable(i.as_str()) == false);
+                (k, vv)
+            })
+            .filter(|(_k, v)| v.len() > 0)
+            .collect::<HashMap<_, _>>();
+
+        let mut core_dedicated: Option<RecipePattern> = None;
+        if let Some(cu) = cust {
+            if let Some(c) = cu.get_compile_flags("c") {
+                if let Some(v) = x.get_mut(&"recipe.c.o.pattern".to_string()) {
+                    v.extend(c);
+                }
+            }
+            if let Some(c) = cu.get_compile_flags("cpp") {
+                if let Some(v) = x.get_mut(&"recipe.cpp.o.pattern".to_string()) {
+                    v.extend(c);
+                }
+            }
+            if let Some(c) = cu.get_compile_flags("asm") {
+                if let Some(v) = x.get_mut(&"recipe.S.o.pattern".to_string()) {
+                    v.extend(c);
+                }
+            }
+            if let Some(c) = cu.get_compile_flags("for_core") {
+                core_dedicated.replace(RecipePattern::new("", &c));
             }
         }
 
-        //1
-        if let Some(s) = try_replace_vars(ret.cmd.as_str(), kv) {
-            ret.cmd = s;
-        }
-        //2
-        for v in &mut ret.flags {
-            if let Some(s) = try_replace_vars(v.as_str(), kv) {
-                *v = s;
-            }
-        }
-        let mut t = Vec::<String>::new();
-        for s in &ret.flags {
-            t.extend(split_quoted_string(s.as_str()));
-        }
-        ret.flags = t;
-        //3
-        for v in &mut ret.inc_dirs {
-            if let Some(s) = try_replace_vars(v.as_str(), kv) {
-                *v = s;
-            }
+        let mut y = x
+            .iter_mut()
+            .map(|(k, v)| {
+                (
+                    k.to_string(),
+                    RecipePattern::new(v.pop_front().unwrap().as_str(), &*v),
+                )
+            })
+            .collect::<HashMap<_, _>>();
+        if let Some(t) = core_dedicated {
+            y.insert(PRIVATE_CORE_DEDICATED.to_string(), t);
         }
 
-        // if any "-I" flag is in flags, move them to inc_dirs
-        ret.flags.iter().for_each(|s| {
-            if let Some(left) = s.strip_prefix("-I") {
-                ret.inc_dirs.push(left.to_string());
-            }
-        });
-        ret.flags.retain(|s| s.starts_with("-I") == false);
-
-        Some(ret)
+        y
     }
 
+    //////////////////////
+
+    /// it like split_whitespace, but it enhanced to deal with quoted string
     pub fn split_quoted_string(input: &str) -> Vec<String> {
         let mut result = Vec::new();
         let mut current_item = String::new();
@@ -1171,211 +898,6 @@ mod board_txt {
         result.retain(|s| s.len() > 0);
 
         result
-    }
-
-    pub fn kv_to_strlines(map: &KVMap) -> String {
-        let mut ret = String::default();
-        for (k, v) in map {
-            ret += format!("{}={}\n", k, v).as_str();
-        }
-        ret
-    }
-
-    pub fn strlines_to_kv(str: &String) -> KVMap {
-        let mut all: KVMap = HashMap::new();
-        for line in str.lines() {
-            if let Some((first, second)) = line.split_once('=') {
-                let key = first.trim().to_string();
-                let value = second.trim().to_string();
-
-                all.insert(key, value);
-            }
-        }
-        all
-    }
-}
-
-#[doc(hidden)]
-mod package_index {
-    use serde::{Deserialize, Serialize};
-    use std::path::{Path, PathBuf};
-
-    use super::BOARDID;
-
-    #[derive(Debug, Clone, Serialize, Deserialize)]
-    struct ToolDefJson {
-        packager: String,
-        name: String,
-        version: String,
-    }
-
-    impl ToolDefJson {
-        /// relative to arduino_data path
-        pub fn get_relative_tool_path(&self) -> PathBuf {
-            Path::new("packages")
-                .join(&self.packager)
-                .join("tools")
-                .join(&self.name)
-                .join(&self.version)
-        }
-    }
-
-    #[derive(Debug, Clone, Serialize, Deserialize)]
-    struct PlatformJson {
-        pub architecture: String,
-        pub version: String,
-        pub toolsDependencies: Vec<ToolDefJson>,
-    }
-    impl PlatformJson {
-        /// check var whether exist in self. include_ver identify the var whether include version
-        ///
-        fn check<'a>(&'a self, var: &str, include_ver: bool) -> Option<&'a ToolDefJson> {
-            if include_ver {
-                if let Some(index) = self
-                    .toolsDependencies
-                    .iter()
-                    .position(|x| format!("{}-{}", x.name, x.version) == var)
-                {
-                    return self.toolsDependencies.get(index);
-                }
-            }
-            if let Some(index) = self.toolsDependencies.iter().position(|x| x.name == var) {
-                return self.toolsDependencies.get(index);
-            }
-
-            None
-        }
-    }
-
-    #[derive(Debug, Clone, Serialize, Deserialize)]
-    struct PackageJson {
-        name: String,
-        platforms: Vec<PlatformJson>,
-    }
-
-    /// notes: all version related list is sorted in decending order
-    #[derive(Debug, Clone, Serialize, Deserialize)]
-    pub struct PackageIndexJSON {
-        packages: Vec<PackageJson>,
-    }
-
-    impl PackageIndexJSON {
-        pub fn new(data_path: &Path, architecture_filter: &str) -> Self {
-            if let Some(x) = parse_package_index_json(data_path, architecture_filter) {
-                return x;
-            }
-            return Self {
-                packages: Vec::<PackageJson>::new(),
-            };
-        }
-
-        /// runtime_tools_var example: runtime.tools.avr-gcc.path.
-        /// result is relative path. e.g. "packages/arduino/tools/arduinoota/1.3.0". data_path join it will be the finall path.
-        pub fn search_runtime_tools(
-            &self,
-            board: &BOARDID,
-            runtime_tools_var: &str,
-        ) -> Option<PathBuf> {
-            let runtime_tools_var = runtime_tools_var
-                .trim()
-                .trim_start_matches("runtime.tools.")
-                .trim_end_matches(".path");
-
-            let (packager, platform_ver) = (&board.packager, &board.platform_ver);
-
-            //first try, guess the var include version
-            if let Some(p) = self.get_package_ref(packager) {
-                if let Some(pl) = self.get_platform_ref(packager, platform_ver) {
-                    if let Some(td) = pl.check(runtime_tools_var, true) {
-                        return Some(td.get_relative_tool_path());
-                    }
-                }
-                //try in same packager
-                for pl in &p.platforms {
-                    if let Some(td) = pl.check(runtime_tools_var, true) {
-                        return Some(td.get_relative_tool_path());
-                    }
-                }
-            }
-
-            // second try, guess the var is not include version
-            if let Some(p) = self.get_package_ref(packager) {
-                if let Some(pl) = self.get_platform_ref(packager, platform_ver) {
-                    if let Some(td) = pl.check(runtime_tools_var, false) {
-                        return Some(td.get_relative_tool_path());
-                    }
-                }
-                //try in same packager
-                for pl in &p.platforms {
-                    if let Some(td) = pl.check(runtime_tools_var, false) {
-                        return Some(td.get_relative_tool_path());
-                    }
-                }
-            }
-            // try in all packages
-            for p in &self.packages {
-                for pl in &p.platforms {
-                    if let Some(td) = pl.check(runtime_tools_var, true) {
-                        return Some(td.get_relative_tool_path());
-                    }
-                    if let Some(td) = pl.check(runtime_tools_var, false) {
-                        return Some(td.get_relative_tool_path());
-                    }
-                }
-            }
-
-            return None;
-        }
-
-        fn get_package_ref(&self, packager: &str) -> Option<&PackageJson> {
-            if let Some(index) = &self.packages.iter().position(|x| &x.name == packager) {
-                return self.packages.get(*index);
-            }
-            None
-        }
-        fn get_platform_ref(&self, packager: &str, platform_ver: &str) -> Option<&PlatformJson> {
-            if let Some(p) = self.get_package_ref(&packager) {
-                if let Some(index) = p.platforms.iter().position(|x| platform_ver == x.version) {
-                    return p.platforms.get(index);
-                }
-            }
-            None
-        }
-    }
-
-    /// parse and store . attention: all platforms and toolsdependencies stored in descending order
-    fn parse_package_index_json(
-        data_path: &Path,
-        architecture_filter: &str,
-    ) -> Option<PackageIndexJSON> {
-        let package_index_json_path = data_path.join("package_index.json");
-
-        let mut config = if let Ok(cfgstring) = std::fs::read_to_string(package_index_json_path) {
-            let config: PackageIndexJSON =
-                serde_json::from_str(cfgstring.as_str()).expect("Unable to parse");
-            config
-        } else {
-            return None;
-        };
-
-        for package in &mut config.packages {
-            package
-                .platforms
-                .retain(|x| x.architecture.as_str() == architecture_filter);
-        }
-        config.packages.retain(|x| x.platforms.len() > 0);
-
-        //sort in-descending-order
-        for p in &mut config.packages {
-            p.platforms
-                .sort_by(|a, b| b.version.partial_cmp(&a.version).unwrap());
-            for pf in &mut p.platforms {
-                pf.toolsDependencies
-                    .sort_by(|a, b| b.version.partial_cmp(&a.version).unwrap())
-            }
-        }
-
-        Some(config)
     }
 }
 
@@ -1470,10 +992,16 @@ mod clang_x {
 
 #[cfg(test)]
 mod tests {
+    use super::board_txt::BoardInfo;
     #[test]
-    fn it_works() {}
-}
+    fn it_works() {
+        let fqbn = "arduino:avr:diecimila:cpu=atmega168";
+        // let fqbn = "arduino:esp32:nano_nora:USBMode=hwcdc";
+        let b = BoardInfo::new(fqbn, None);
 
+        println!("{:#?}", b);
+    }
+}
 
 // https://stackoverflow.com/questions/74791719/where-are-avr-gcc-libraries-stored/74823286#74823286?newreg=5606ba2c93bc47c9bff2848849d3c78a
 // avr-gcc -print-file-name=libc.a -mmcu=...

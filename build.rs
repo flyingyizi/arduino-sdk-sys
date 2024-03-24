@@ -1,6 +1,6 @@
 // extern crate avr_mcu;
 extern crate bindgen;
-extern crate serde_json;
+extern crate serde_yaml;
 extern crate serde;
 #[cfg(feature = "prettify_bindgen")]
 extern crate clang;
