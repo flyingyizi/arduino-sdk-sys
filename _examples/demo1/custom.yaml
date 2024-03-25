@@ -1,0 +1,11 @@
+# except fqbn, others are all optional.
+# fqbn format is: VENDOR:ARCHITECTURE:BOARD_ID[:MENU_ID=OPTION_ID[,MENU2_ID=OPTION_ID ...]]
+# e.g. arduino:avr:diecimila:cpu=atmega168
+# e.g. arduino:avr:uno
+fqbn: arduino:avr:uno
+
+
+#external libraries ,that located in user directory (sketchbook)
+external_libraries:
+    - LiquidCrystal_I2C
+    - Servo
