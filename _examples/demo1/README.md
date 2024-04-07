@@ -32,13 +32,3 @@ at your option.
 Unless you explicitly state otherwise, any contribution intentionally submitted
 for inclusion in the work by you, as defined in the Apache-2.0 license, shall
 be dual licensed as above, without any additional terms or conditions.
-
-$$\begin{tikzpicture}\small
-\def\r{1.8}
-\coordinate[label=$A$] (A) at (0.5*\r,0.8*\r);
-\coordinate[label=below:$B$] (B) at (-\r,0);
-\coordinate[label=below:$C$] (C) at (\r,0);
-\draw[thin] (A) -- node[above] {$c$}
-   node[pos=0.03,below,inner sep=4] {$\alpha$}
-   (B) -- (C) -- node[right] {$b$} (A);
-\end{tikzpicture}$$

@@ -15,7 +15,7 @@ panic-halt = "0.2.0"
 ufmt = "0.2.0"
 nb = "0.1.2"
 embedded-hal = "0.2.3"
-arduino-sdk-sys = {path="../../../arduino-sdk-sys", features = ["prettify_bindgen"]}
+arduino-sdk-sys = {path="../../../arduino-sdk-sys", features = ["native_bindgen"]}
 
 
 [dependencies.arduino-hal]
